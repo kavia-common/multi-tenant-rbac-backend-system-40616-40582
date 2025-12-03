@@ -123,6 +123,8 @@ class AppSettings:
                 )
 
         jwt_secret = os.getenv("JWT_SECRET_KEY", "change_me_in_env")
+        if jwt_secret == "change_me_in_env":
+            logger.warning("JWT_SECRET_KEY not set; using insecure default suitable for local dev only.")
         jwt_algo = os.getenv("JWT_ALGORITHM", "HS256")
         jwt_exp_minutes = int(os.getenv("JWT_ACCESS_EXPIRE_MINUTES", "60"))
 

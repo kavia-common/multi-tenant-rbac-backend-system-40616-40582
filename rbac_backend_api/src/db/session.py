@@ -8,7 +8,7 @@ from typing import Generator, Optional
 import os
 import logging
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import OperationalError
 
@@ -68,13 +68,13 @@ def _ensure_engine():
     if not _connectivity_checked:
         try:
             with _engine.connect() as conn:  # type: ignore[union-attr]
-                conn.execute("SELECT 1")
+                conn.execute(text("SELECT 1"))
             _connectivity_checked = True
             logger.info("Database connectivity check succeeded.")
         except OperationalError as exc:
             logger.exception("Database connectivity check failed.")
-            # Raise runtime error so API layer can map to 503
-            raise RuntimeError("Database is unreachable. Verify MYSQL_* env vars and database availability.") from exc
+            # Raise runtime error so API layer can map to 503 with clear message
+            raise RuntimeError("DB not configured or unreachable (OperationalError). Check DSN/MYSQL_* and DB service.") from exc
 
 
 # PUBLIC_INTERFACE

@@ -5,8 +5,10 @@ from dataclasses import dataclass
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import OperationalError, SQLAlchemyError, IntegrityError
 from sqlalchemy.orm import Session
 
+from src.core.config import get_settings
 from src.db.session import session_scope
 from src.models.organization import Organization
 from src.models.user import User
@@ -43,6 +45,22 @@ def _ensure_init_allowed() -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Seeding disabled. Set INIT_ALLOW=1 in environment to enable.",
         )
+
+def _assert_config_preconditions() -> None:
+    """
+    Validate core configuration before hitting the database so we can fail fast with specific reasons.
+    """
+    settings = get_settings()
+    # DB DSN presence check; detailed message if missing
+    if not (settings.sql_alchemy_dsn or os.getenv("DB_DSN") or os.getenv("MYSQL_USER")):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="DB not configured: Set DB_DSN, DB_CONNECTION_FILE, or MYSQL_* env vars.",
+        )
+    # JWT secret presence check (warn but allow with explicit message)
+    if not settings.jwt.secret_key or settings.jwt.secret_key == "change_me_in_env":
+        logger.warning("JWT_SECRET_KEY is missing or default; using insecure default for dev only.")
+        # do not fail hard for seeding, but include in logs
 
 def _seed_core_entities(db: Session, defaults: SeedDefaults) -> InitResult:
     """
@@ -161,9 +179,10 @@ def seed_dev_data() -> InitResult:
         InitResult: created or existing IDs, plus dev email/password.
 
     Raises:
-        HTTPException: 403 if disabled, or 500 with details if an unexpected error occurs.
+        HTTPException: 403 if disabled, or mapped errors with specific causes.
     """
     _ensure_init_allowed()
+    _assert_config_preconditions()
 
     defaults = SeedDefaults()
     try:
@@ -171,10 +190,26 @@ def seed_dev_data() -> InitResult:
             result = _seed_core_entities(db, defaults)
             return result
     except HTTPException:
-        # pass through any explicit HTTPException
         raise
+    except IntegrityError as exc:
+        logger.exception("Seeding failed due to SQL integrity error")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Seeding failed: SQL integrity error ({exc.orig})",
+        ) from exc
+    except OperationalError as exc:
+        logger.exception("Seeding failed due to DB connectivity/operational error")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database unreachable or misconfigured (OperationalError).",
+        ) from exc
+    except SQLAlchemyError as exc:
+        logger.exception("Seeding failed due to SQLAlchemy error")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Seeding failed: SQL error ({exc.__class__.__name__})",
+        ) from exc
     except Exception as exc:
-        # Detailed logging with exception info
         logger.exception("Seeding failed due to unexpected error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
