@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import OperationalError, SQLAlchemyError, IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from src.core.config import get_settings
 from src.db.session import session_scope
@@ -49,6 +50,7 @@ def _ensure_init_allowed() -> None:
 def _assert_config_preconditions() -> None:
     """
     Validate core configuration before hitting the database so we can fail fast with specific reasons.
+    Also perform a lightweight connectivity test (SELECT 1) to ensure DB is reachable before seeding.
     """
     settings = get_settings()
     # DB DSN presence check; detailed message if missing
@@ -166,6 +168,13 @@ def _seed_core_entities(db: Session, defaults: SeedDefaults) -> InitResult:
     response_model=InitResult,
     summary="Seed dev data (org and user)",
     description="Dev-only endpoint to initialize a test organization and user if database is empty. Requires INIT_ALLOW=1 env.",
+    operation_id="seed_dev_data_api_init_seed_post",
+    responses={
+        200: {"description": "Seeded successfully", "model": InitResult},
+        403: {"description": "Seeding disabled (INIT_ALLOW not set)"},
+        503: {"description": "Database unreachable or misconfigured"},
+        500: {"description": "Seeding failed due to server error"},
+    },
 )
 def seed_dev_data() -> InitResult:
     """
@@ -186,16 +195,30 @@ def seed_dev_data() -> InitResult:
 
     defaults = SeedDefaults()
     try:
+        # Ensure session connectivity and transactional behavior happen via session_scope
         with session_scope() as db:
+            # Connectivity test at session level to provide clearer error if schema missing/unreachable
+            try:
+                # simple SELECT 1 ensures connection and current schema accessibility
+                db.execute(text("SELECT 1"))
+            except Exception as ping_exc:
+                logger.exception("Connectivity test failed before seeding.")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Database unreachable or schema not accessible.",
+                ) from ping_exc
+
             result = _seed_core_entities(db, defaults)
             return result
     except HTTPException:
         raise
     except IntegrityError as exc:
         logger.exception("Seeding failed due to SQL integrity error")
+        # surface table name/constraint if present, but avoid leaking sensitive info
+        msg = str(getattr(exc.orig, "args", ["integrity error"])[0])
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Seeding failed: SQL integrity error ({exc.orig})",
+            detail=f"Seeding failed: SQL integrity error ({msg})",
         ) from exc
     except OperationalError as exc:
         logger.exception("Seeding failed due to DB connectivity/operational error")

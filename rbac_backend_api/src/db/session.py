@@ -1,6 +1,12 @@
 """
 Database engine and session management using SQLAlchemy 2.0 style.
 Handles absence of configured DB DSN gracefully by delaying engine creation.
+
+Connectivity verification:
+- On first use, runs a lightweight SELECT 1 to ensure the database is reachable.
+- Raises RuntimeError with actionable message so API can convert to HTTP 503.
+Transactions:
+- session_scope wraps operations in a transaction and performs commit/rollback.
 """
 
 from contextlib import contextmanager

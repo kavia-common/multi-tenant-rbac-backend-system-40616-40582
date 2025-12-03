@@ -1,7 +1,9 @@
 """
 Application configuration: environment variables, DB connection string, and JWT settings.
 Reads db_connection.txt to build SQLAlchemy DSN using utils.db_conn_parser.
+Also supports constructing DSN from MYSQL_* env vars (MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DB).
 The configuration is resilient: missing db_connection.txt will not prevent app startup.
+JWT secret must be provided in production (JWT_SECRET_KEY); missing defaults are allowed only for local/dev.
 """
 
 import os
