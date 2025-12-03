@@ -95,8 +95,9 @@ def create_app() -> FastAPI:
     app.include_router(organizations_router, tags=["rbac"])
     app.include_router(audit_logs_router, tags=["rbac"])
 
-    # - init router defines prefix="/api/init" already
-    app.include_router(init_router, tags=["health"])
+    # - init router mounted once with explicit prefix to avoid duplication
+    logging.getLogger(__name__).info("Registering init router at prefix /api/init (seed endpoint: POST /api/init/seed)")
+    app.include_router(init_router, prefix="/api/init", tags=["health"])
 
     @app.get("/", tags=["health"], summary="Health Check", description="Basic service health check.")
     # PUBLIC_INTERFACE

@@ -21,7 +21,7 @@ from src.security.auth import get_password_hash
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/init", tags=["health"])
+router = APIRouter(tags=["health"])
 
 class InitResult(BaseModel):
     """Initialization result."""
@@ -245,10 +245,11 @@ def _seed_core_entities(db: Session, defaults: SeedDefaults) -> InitResult:
         503: {"description": "Database unreachable or misconfigured", "model": InitError},
         500: {"description": "Seeding failed due to server error", "model": InitError},
     },
-    tags=["health", "health"],
+    tags=["health"],
 )
 # PUBLIC_INTERFACE
 def seed_dev_data(db_dep: Session | None = Depends(get_db)) -> InitResult:
+    logger.info("Handling POST /api/init/seed (INIT_ALLOW=%s)", os.getenv("INIT_ALLOW"))
     """Seed dev organization, admin user, roles and permissions.
 
     Public API:
