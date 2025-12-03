@@ -18,7 +18,9 @@ router = APIRouter(prefix="/api", tags=["auth"])
 
 def get_db():
     """Yield a SQLAlchemy session."""
-    db = SessionLocal()
+    # SessionLocal() now returns the sessionmaker factory when called, then instantiating it creates a session.
+    SessionFactory = SessionLocal()
+    db = SessionFactory()
     try:
         yield db
     finally:

@@ -23,7 +23,8 @@ reuseable_oauth2 = HTTPBearer(auto_error=True)
 
 def get_db():
     """Yield a SQLAlchemy session."""
-    db = SessionLocal()
+    SessionFactory = SessionLocal()
+    db = SessionFactory()
     try:
         yield db
     finally:
