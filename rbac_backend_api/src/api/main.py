@@ -1,3 +1,10 @@
+"""
+FastAPI application entrypoint.
+
+- Registers all routers (auth, RBAC, audit, init, health).
+- Keeps database checks lazy so the app can start without a DB connection.
+- OpenAPI includes tags and a root health endpoint for liveness checks.
+"""
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
@@ -49,7 +56,13 @@ app.include_router(audit_logs_router)
 app.include_router(init_router)
 app.include_router(health_router)
 
+# PUBLIC_INTERFACE
 @app.get("/", tags=["health"], summary="Health Check", description="Basic service health check.")
 def health_check():
-    """Basic liveness probe for the service."""
+    """
+    Basic liveness probe for the service.
+
+    Returns:
+        JSON object with a message indicating service status.
+    """
     return {"message": "Healthy"}
