@@ -17,7 +17,7 @@ from src.security.dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api", tags=["auth"])
+router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 # Use shared get_db from src.db.session
