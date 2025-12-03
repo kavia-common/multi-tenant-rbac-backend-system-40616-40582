@@ -6,21 +6,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, and_
 from sqlalchemy.orm import Session
 
-from src.db.session import SessionLocal
+from src.db.session import get_db
 from src.models.audit_log import AuditLog
 from src.models.user import User
 from src.security.dependencies import get_current_user, require_permission
 
 router = APIRouter(prefix="/api/audit_logs", tags=["rbac"])
 
-def get_db():
-    """Yield a SQLAlchemy session (SessionLocal factory pattern)."""
-    SessionFactory = SessionLocal()
-    db = SessionFactory()
-    try:
-        yield db
-    finally:
-        db.close()
+# Use centralized DB dependency that handles 503 when DB is unavailable
 
 class AuditLogOut(BaseModel):
     """Audit log response model."""

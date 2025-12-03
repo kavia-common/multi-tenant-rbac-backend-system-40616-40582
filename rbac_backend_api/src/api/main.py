@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 import os
 
-from src.core.config import get_settings
 from src.routers.auth import router as auth_router
 from src.routers.organizations import router as organizations_router
 from src.routers.users import router as users_router
@@ -19,8 +18,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 
-settings = get_settings()
-
 openapi_tags = [
     {"name": "health", "description": "Health check and service info"},
     {"name": "auth", "description": "Authentication endpoints"},
@@ -28,7 +25,7 @@ openapi_tags = [
 ]
 
 app = FastAPI(
-    title=settings.project_name,
+    title=os.getenv("PROJECT_NAME", "RBAC Backend API"),
     description="Multi-tenant RBAC backend with JWT auth and SQLAlchemy",
     version="0.1.0",
     openapi_tags=openapi_tags,

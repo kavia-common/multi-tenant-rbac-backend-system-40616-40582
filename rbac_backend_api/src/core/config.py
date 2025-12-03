@@ -1,8 +1,12 @@
 """
 Application configuration: environment variables, DB connection string, and JWT settings.
-Reads db_connection.txt to build SQLAlchemy DSN using utils.db_conn_parser.
-Also supports constructing DSN from MYSQL_* env vars (MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DB).
-The configuration is resilient: missing db_connection.txt will not prevent app startup.
+
+Key behavior requirements:
+- No database connectivity or file reads must occur at module import time, unless DB_CONNECTION_FILE is explicitly provided and exists.
+- If db_connection.txt or configured file is absent, do NOT raise; return settings with sql_alchemy_dsn=None.
+- Logging should mask secrets when logging DSN details.
+
+This module reads env to build SQLAlchemy DSN using utils.db_conn_parser or MYSQL_* env vars.
 JWT secret must be provided in production (JWT_SECRET_KEY); missing defaults are allowed only for local/dev.
 """
 
@@ -108,14 +112,14 @@ class AppSettings:
                 # Resolve relative to current working directory if not absolute.
                 if not os.path.isabs(db_conn_path):
                     db_conn_path = os.path.join(os.getcwd(), db_conn_path)
-                dsn = AppSettings._try_parse_db_file(db_conn_path)
+                # Only read if the file actually exists; otherwise skip without error.
+                if os.path.exists(db_conn_path):
+                    dsn = AppSettings._try_parse_db_file(db_conn_path)
+                else:
+                    logger.info("DB_CONNECTION_FILE is set but not found at %s; proceeding without DSN.", db_conn_path)
 
-            # 3) Fallback: default relative path to sibling database container folder
-            if not dsn:
-                default_rel = os.path.join(os.getcwd(), "..", "rbac_mysql_database", "db_connection.txt")
-                dsn = AppSettings._try_parse_db_file(default_rel)
-
-            # 4) Build from MYSQL_* env vars
+            # 3) We will NOT scan default sibling paths at import; only use MYSQL_* env vars as fallback.
+            # Build from MYSQL_* env vars
             if not dsn:
                 dsn = _build_dsn_from_mysql_env()
                 if dsn:
@@ -155,7 +159,7 @@ class AppSettings:
         )
 
 
-# Singleton-like accessor
+# Singleton-like accessor (no connectivity or file probing beyond allowed checks)
 _settings: Optional[AppSettings] = None
 
 

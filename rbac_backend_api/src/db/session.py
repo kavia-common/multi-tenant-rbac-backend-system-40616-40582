@@ -1,12 +1,16 @@
 """
 Database engine and session management using SQLAlchemy 2.0 style.
-Handles absence of configured DB DSN gracefully by delaying engine creation.
+Import-safe: no DB connections are attempted at module import time.
 
-Connectivity verification:
-- On first use, runs a lightweight SELECT 1 to ensure the database is reachable.
-- Raises RuntimeError with actionable message so API can convert to HTTP 503.
-Transactions:
-- session_scope wraps operations in a transaction and performs commit/rollback.
+Behavior:
+- Engine and SessionFactory are created lazily.
+- No engine.connect() or SELECT 1 at import; connectivity checked only when dependency get_db() is invoked.
+- If DB is misconfigured/unavailable, get_db() raises HTTPException 503.
+
+Public interfaces:
+- session_scope() context manager
+- SessionLocal() factory accessor (kept for backward compatibility)
+- get_db() FastAPI dependency
 """
 
 from contextlib import contextmanager
@@ -14,6 +18,7 @@ from typing import Generator, Optional
 import os
 import logging
 
+from fastapi import HTTPException, status
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
@@ -21,18 +26,15 @@ from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from src.core.config import get_settings
 
 logger = logging.getLogger(__name__)
-settings = get_settings()
 
-# Engine and session factory are created lazily to allow app startup without DB configured.
-_engine: Optional[object] = None
-_SessionLocal: Optional[sessionmaker] = None
-_connectivity_checked: bool = False  # ensure we test connectivity only once on first session creation
+# Globals initialized lazily on first use
+_engine = None  # type: Optional[object]
+_SessionLocal = None  # type: Optional[sessionmaker]
 
 
 def _build_dsn_from_env() -> Optional[str]:
     """
     Attempt to construct a MySQL DSN from standard MYSQL_* environment variables if settings sql_alchemy_dsn is missing.
-    This supports local/dev scenarios where db_connection.txt isn't present but env vars are.
     """
     host = os.getenv("MYSQL_HOST") or os.getenv("MYSQL_URL") or os.getenv("DB_HOST") or "localhost"
     user = os.getenv("MYSQL_USER")
@@ -45,60 +47,66 @@ def _build_dsn_from_env() -> Optional[str]:
     return None
 
 
-def _ensure_engine():
-    """Create engine and sessionmaker if DSN is available; otherwise raise a clear error on usage."""
-    global _engine, _SessionLocal, _connectivity_checked
-    if _engine is None or _SessionLocal is None:
-        dsn = settings.sql_alchemy_dsn or _build_dsn_from_env()
-        if not dsn:
-            logger.error("Database DSN not configured. Provide DB_DSN or db_connection.txt or MYSQL_* environment vars.")
-            raise RuntimeError(
-                "Database is not configured. Set DB_DSN, provide a db_connection.txt, or set MYSQL_* env vars and restart. "
-                "See .env.example for details."
-            )
-        # Log DSN without password for visibility
-        try:
-            safe_dsn_tail = dsn.split("@")[-1]
-            logger.info("Initializing database engine with DSN: mysql+pymysql://****:****@%s", safe_dsn_tail)
-        except Exception:
-            logger.info("Initializing database engine with DSN from configuration.")
-        try:
-            _engine = create_engine(
-                dsn,
-                pool_pre_ping=True,
-                pool_recycle=3600,
-                future=True,
-            )
-            _SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False, future=True)
-        except Exception as exc:
-            logger.exception("Failed creating SQLAlchemy engine")
-            raise RuntimeError("Failed to initialize DB engine. See server logs for details.") from exc
+def _create_engine_and_session_factory() -> None:
+    """Internal helper to create engine and Session factory without testing connectivity."""
+    global _engine, _SessionLocal
+    if _engine is not None and _SessionLocal is not None:
+        return
+    settings = get_settings()
+    dsn = settings.sql_alchemy_dsn or _build_dsn_from_env()
+    if not dsn:
+        logger.warning("Database DSN not configured (DB_DSN or MYSQL_*). Engine will not be created yet.")
+        return
+    try:
+        safe_tail = dsn.split("@")[-1]
+        logger.info("Creating SQLAlchemy engine with DSN: mysql+pymysql://****:****@%s", safe_tail)
+    except Exception:
+        logger.info("Creating SQLAlchemy engine with DSN from configuration.")
+    try:
+        _engine = create_engine(
+            dsn,
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            future=True,
+        )
+        _SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False, future=True)
+    except Exception:
+        logger.exception("Failed to create SQLAlchemy engine")
+        # Defer surfacing to request-time to avoid startup failure
+        _engine = None
+        _SessionLocal = None
 
-    # Lightweight connectivity check once, on first use
-    if not _connectivity_checked:
-        try:
-            assert _engine is not None
-            with _engine.connect() as conn:  # type: ignore[union-attr]
-                conn.execute(text("SELECT 1"))
-            _connectivity_checked = True
-            logger.info("Database connectivity check succeeded.")
-        except (OperationalError, SQLAlchemyError) as exc:
-            # Include DSN without password in logs for diagnostics
-            try:
-                safe_tail = (settings.sql_alchemy_dsn or _build_dsn_from_env() or "").split("@")[-1]
-                logger.error("Database connectivity check failed to %s", safe_tail)
-            except Exception:
-                logger.error("Database connectivity check failed.")
-            logger.exception("Exact DB error during connectivity probe")
-            # Raise runtime error so API layer can map to 503 with clear message
-            raise RuntimeError("Database is not configured or unavailable") from exc
+
+def _ensure_session_factory_available_or_503() -> None:
+    """
+    Ensure Session factory exists and database is at least reachable by a lightweight ping.
+    Any failure results in HTTP 503 to the caller.
+    """
+    # Ensure factory exists; do not redeclare globals since we don't assign here
+    if _engine is None or _SessionLocal is None:
+        _create_engine_and_session_factory()
+        if _engine is None or _SessionLocal is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database is not configured or unavailable",
+            )
+    # Connectivity probe to fail fast per request
+    try:
+        assert _engine is not None
+        with _engine.connect() as conn:  # type: ignore[union-attr]
+            conn.execute(text("SELECT 1"))
+    except (OperationalError, SQLAlchemyError):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database is not configured or unavailable",
+        )
 
 
 # PUBLIC_INTERFACE
 @contextmanager
 def session_scope() -> Generator:
     """Provide a transactional scope around a series of operations."""
-    _ensure_engine()
+    _ensure_session_factory_available_or_503()
     assert _SessionLocal is not None  # for type checkers
     db = _SessionLocal()
     try:
@@ -113,19 +121,15 @@ def session_scope() -> Generator:
 
 # PUBLIC_INTERFACE
 def SessionLocal():
-    """Return a SQLAlchemy session factory, ensuring engine is initialized.
-
-    Note: This mirrors the previous import style (from src.db.session import SessionLocal)
-    so existing code paths keep working.
-    """
-    _ensure_engine()
+    """Return a SQLAlchemy session factory, ensuring engine is initialized (may raise HTTP 503 on failure)."""
+    _ensure_session_factory_available_or_503()
     return _SessionLocal
 
 
 # PUBLIC_INTERFACE
 def get_db() -> Generator:
-    """Yield a SQLAlchemy session from a single, shared SessionFactory source."""
-    _ensure_engine()
+    """Yield a SQLAlchemy session from the shared SessionFactory; returns 503 if DB is unavailable."""
+    _ensure_session_factory_available_or_503()
     assert _SessionLocal is not None
     db = _SessionLocal()
     try:

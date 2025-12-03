@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, delete
 from sqlalchemy.orm import Session
 
-from src.db.session import SessionLocal
+from src.db.session import get_db
 from src.models.audit_log import AuditLog
 from src.models.permission import Permission
 from src.schemas.permission import PermissionCreate, PermissionOut
@@ -14,14 +14,7 @@ from src.models.user import User
 
 router = APIRouter(prefix="/api/permissions", tags=["rbac"])
 
-def get_db():
-    """Yield a SQLAlchemy session (SessionLocal factory pattern)."""
-    SessionFactory = SessionLocal()
-    db = SessionFactory()
-    try:
-        yield db
-    finally:
-        db.close()
+# Use centralized DB dependency that handles 503 when DB is unavailable
 
 def _audit(db: Session, org_id: int, user_id: Optional[int], action: str, resource_type: str, resource_id: Optional[str], details: Optional[str] = None) -> None:
     """Internal helper to write an audit log."""
