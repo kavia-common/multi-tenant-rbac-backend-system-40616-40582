@@ -1,13 +1,13 @@
-from typing import Optional
+from typing import Optional, Dict, List
 import os
 import logging
 from dataclasses import dataclass
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy.exc import OperationalError, SQLAlchemyError, IntegrityError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError, IntegrityError, ProgrammingError
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, inspect
 
 from src.core.config import get_settings
 from src.db.session import session_scope
@@ -30,6 +30,12 @@ class InitResult(BaseModel):
     email: Optional[str] = Field(None, description="User email for login")
     password: Optional[str] = Field(None, description="Plain test password (dev only)")
 
+class InitError(BaseModel):
+    """Structured initialization error details."""
+    error: str = Field(..., description="High-level error category")
+    cause: str = Field(..., description="Root cause message")
+    hints: List[str] = Field(default_factory=list, description="Suggested remediation steps")
+
 @dataclass
 class SeedDefaults:
     org_name: str = "Test Org"
@@ -44,25 +50,87 @@ def _ensure_init_allowed() -> None:
         logger.warning("Attempt to call /api/init/seed while INIT_ALLOW=%s", init_allow)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Seeding disabled. Set INIT_ALLOW=1 in environment to enable.",
+            detail=InitError(
+                error="forbidden",
+                cause=f"Seeding disabled. INIT_ALLOW={init_allow!r}",
+                hints=["Set INIT_ALLOW=1 in environment and retry."],
+            ).model_dump(),
         )
 
 def _assert_config_preconditions() -> None:
     """
-    Validate core configuration before hitting the database so we can fail fast with specific reasons.
-    Also perform a lightweight connectivity test (SELECT 1) to ensure DB is reachable before seeding.
+    Validate env configuration: DB DSN derivation and JWT secret presence.
+    Do not hard fail on JWT in dev, but return clear guidance.
     """
     settings = get_settings()
-    # DB DSN presence check; detailed message if missing
-    if not (settings.sql_alchemy_dsn or os.getenv("DB_DSN") or os.getenv("MYSQL_USER")):
+    # DB DSN presence check across all supported sources
+    dsn_sources = {
+        "settings.sql_alchemy_dsn": bool(settings.sql_alchemy_dsn),
+        "DB_DSN": bool(os.getenv("DB_DSN")),
+        "MYSQL_*": bool(os.getenv("MYSQL_USER") and os.getenv("MYSQL_DB")),
+        "DB_CONNECTION_FILE": bool(os.getenv("DB_CONNECTION_FILE")),
+    }
+    if not any(dsn_sources.values()):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="DB not configured: Set DB_DSN, DB_CONNECTION_FILE, or MYSQL_* env vars.",
+            detail=InitError(
+                error="db_dsn_missing",
+                cause="Database DSN not configured.",
+                hints=[
+                    "Provide DB_DSN env or",
+                    "Set DB_CONNECTION_FILE or",
+                    "Set MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DB",
+                    "See .env.example and schema_setup.sh in the repo.",
+                ],
+            ).model_dump(),
         )
-    # JWT secret presence check (warn but allow with explicit message)
+
+    # JWT secret presence check (warn but allow for dev)
     if not settings.jwt.secret_key or settings.jwt.secret_key == "change_me_in_env":
         logger.warning("JWT_SECRET_KEY is missing or default; using insecure default for dev only.")
-        # do not fail hard for seeding, but include in logs
+
+def _check_required_tables(db: Session) -> None:
+    """
+    Ensure all required tables exist; if missing, raise 409 with guidance to run migrations/setup.
+    """
+    required_tables = {
+        "organizations",
+        "users",
+        "roles",
+        "permissions",
+        "role_permissions",
+        "user_roles",
+    }
+    try:
+        inspector = inspect(db.bind)
+        existing = set(inspector.get_table_names())
+    except Exception as exc:
+        logger.exception("Failed to inspect database schema.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=InitError(
+                error="db_inspection_failed",
+                cause=f"Could not inspect schema: {exc.__class__.__name__}",
+                hints=[
+                    "Verify database is reachable and user has metadata privileges.",
+                    "Check DB_DSN/MYSQL_* settings.",
+                ],
+            ).model_dump(),
+        ) from exc
+
+    missing = sorted(list(required_tables - existing))
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=InitError(
+                error="db_schema_missing",
+                cause=f"Required tables missing: {', '.join(missing)}",
+                hints=[
+                    "Run schema_setup.sh against the configured database.",
+                    "Ensure your MySQL user has privileges to create tables.",
+                ],
+            ).model_dump(),
+        )
 
 def _seed_core_entities(db: Session, defaults: SeedDefaults) -> InitResult:
     """
@@ -122,7 +190,7 @@ def _seed_core_entities(db: Session, defaults: SeedDefaults) -> InitResult:
         "permissions:read", "permissions:write",
         "audit:read",
     ]
-    perms_by_name = {}
+    perms_by_name: Dict[str, Permission] = {}
     for pname in perm_names:
         perm = (
             db.query(Permission)
@@ -170,11 +238,13 @@ def _seed_core_entities(db: Session, defaults: SeedDefaults) -> InitResult:
     description="Dev-only endpoint to initialize a test organization and user if database is empty. Requires INIT_ALLOW=1 env.",
     operation_id="seed_dev_data_api_init_seed_post",
     responses={
-        200: {"description": "Seeded successfully", "model": InitResult},
-        403: {"description": "Seeding disabled (INIT_ALLOW not set)"},
-        503: {"description": "Database unreachable or misconfigured"},
-        500: {"description": "Seeding failed due to server error"},
+        200: {"description": "Seeded successfully"},
+        403: {"description": "Seeding disabled (INIT_ALLOW not set)", "model": InitError},
+        409: {"description": "Schema missing; run setup first", "model": InitError},
+        503: {"description": "Database unreachable or misconfigured", "model": InitError},
+        500: {"description": "Seeding failed due to server error", "model": InitError},
     },
+    tags=["health"],
 )
 def seed_dev_data() -> InitResult:
     """
@@ -197,16 +267,46 @@ def seed_dev_data() -> InitResult:
     try:
         # Ensure session connectivity and transactional behavior happen via session_scope
         with session_scope() as db:
-            # Connectivity test at session level to provide clearer error if schema missing/unreachable
+            # Connectivity test and schema presence checks
             try:
-                # simple SELECT 1 ensures connection and current schema accessibility
                 db.execute(text("SELECT 1"))
-            except Exception as ping_exc:
+            except OperationalError as ping_exc:
                 logger.exception("Connectivity test failed before seeding.")
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Database unreachable or schema not accessible.",
+                    detail=InitError(
+                        error="db_connection_failed",
+                        cause=f"DB connection failed: {ping_exc.__class__.__name__}",
+                        hints=[
+                            "Verify DB_DSN or MYSQL_* environment variables.",
+                            "Ensure the database service is reachable from the API container.",
+                        ],
+                    ).model_dump(),
                 ) from ping_exc
+            except ProgrammingError as ping_exc:
+                # ProgrammingError may indicate schema/database issues
+                logger.exception("Programming error on DB ping; likely schema missing.")
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=InitError(
+                        error="db_schema_missing",
+                        cause=f"DB ping raised ProgrammingError: {str(ping_exc)}",
+                        hints=["Run schema_setup.sh against the configured database."],
+                    ).model_dump(),
+                ) from ping_exc
+            except Exception as ping_exc:
+                logger.exception("Unexpected error during DB ping.")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=InitError(
+                        error="db_connection_failed",
+                        cause=f"DB ping failed: {ping_exc.__class__.__name__}",
+                        hints=["Check DSN configuration and DB service status."],
+                    ).model_dump(),
+                ) from ping_exc
+
+            # Schema validation
+            _check_required_tables(db)
 
             result = _seed_core_entities(db, defaults)
             return result
@@ -214,27 +314,42 @@ def seed_dev_data() -> InitResult:
         raise
     except IntegrityError as exc:
         logger.exception("Seeding failed due to SQL integrity error")
-        # surface table name/constraint if present, but avoid leaking sensitive info
         msg = str(getattr(exc.orig, "args", ["integrity error"])[0])
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Seeding failed: SQL integrity error ({msg})",
+            detail=InitError(
+                error="integrity_error",
+                cause=msg,
+                hints=["Check for conflicting unique constraints with existing seed data."],
+            ).model_dump(),
         ) from exc
     except OperationalError as exc:
         logger.exception("Seeding failed due to DB connectivity/operational error")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database unreachable or misconfigured (OperationalError).",
+            detail=InitError(
+                error="db_connection_failed",
+                cause=f"OperationalError: {str(exc.orig) if hasattr(exc, 'orig') else str(exc)}",
+                hints=["Verify DB service, network, and credentials."],
+            ).model_dump(),
         ) from exc
     except SQLAlchemyError as exc:
         logger.exception("Seeding failed due to SQLAlchemy error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Seeding failed: SQL error ({exc.__class__.__name__})",
+            detail=InitError(
+                error="sqlalchemy_error",
+                cause=exc.__class__.__name__,
+                hints=["Inspect server logs for full stacktrace."],
+            ).model_dump(),
         ) from exc
     except Exception as exc:
         logger.exception("Seeding failed due to unexpected error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Seeding failed: {exc.__class__.__name__}",
+            detail=InitError(
+                error="unexpected_error",
+                cause=exc.__class__.__name__,
+                hints=["Inspect server logs for details."],
+            ).model_dump(),
         ) from exc
