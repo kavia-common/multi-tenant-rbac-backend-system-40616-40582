@@ -1,0 +1,4 @@
+{
+    "command": "pytest",
+    "working_directory": "/home/kavia/workspace/code-generation/multi-tenant-rbac-backend-system-40616-40582/rbac_backend_api"
+}
