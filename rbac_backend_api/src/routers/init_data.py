@@ -3,14 +3,14 @@ import os
 import logging
 from dataclasses import dataclass
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import OperationalError, SQLAlchemyError, IntegrityError, ProgrammingError
 from sqlalchemy.orm import Session
 from sqlalchemy import text, inspect
 
 from src.core.config import get_settings
-from src.db.session import session_scope
+from src.db.session import session_scope, get_db
 from src.models.organization import Organization
 from src.models.user import User
 from src.models.role import Role
@@ -21,7 +21,7 @@ from src.security.auth import get_password_hash
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/init", tags=["health", "health"])
+router = APIRouter(prefix="/api/init", tags=["health"])
 
 class InitResult(BaseModel):
     """Initialization result."""
@@ -248,17 +248,22 @@ def _seed_core_entities(db: Session, defaults: SeedDefaults) -> InitResult:
     tags=["health", "health"],
 )
 # PUBLIC_INTERFACE
-def seed_dev_data() -> InitResult:
+def seed_dev_data(db_dep: Session | None = Depends(get_db)) -> InitResult:
     """Seed dev organization, admin user, roles and permissions.
 
     Public API:
     - Method: POST /api/init/seed
-    - Response: 200 JSON with {created_org_id, created_user_id, email, password}
+    - Response (200): JSON with {created_org_id, created_user_id, email, password}
     - Error responses:
-      403 when INIT_ALLOW != "1";
-      503 when DB is unreachable/misconfigured;
-      409 when required tables are missing;
-      500 for unexpected server or integrity/SQL errors.
+      403: Seeding disabled when INIT_ALLOW != "1"
+      503: Database unreachable/misconfigured
+      409: Required schema/tables missing
+      500: Unexpected server or SQL errors
+
+    Notes:
+    - Uses unified get_db dependency to ensure the global engine/session is initialized consistently.
+    - Actual transaction handled via session_scope to keep operation atomic. The db_dep is accepted to
+      initialize the shared Session factory and for alignment with other routes.
     """
     _ensure_init_allowed()
     _assert_config_preconditions()
