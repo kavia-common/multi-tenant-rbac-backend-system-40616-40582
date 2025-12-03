@@ -90,7 +90,11 @@ class AppSettings:
         # 1) Explicit DSN takes priority
         dsn: Optional[str] = os.getenv("DB_DSN")
         if dsn:
-            logger.info("Using DB_DSN from environment.")
+            try:
+                safe_tail = dsn.split("@")[-1]
+                logger.info("Using DB_DSN from environment (masked): mysql+pymysql://****:****@%s", safe_tail)
+            except Exception:
+                logger.info("Using DB_DSN from environment.")
         else:
             # 2) DB_CONNECTION_FILE if provided and exists
             db_conn_path = os.getenv("DB_CONNECTION_FILE")

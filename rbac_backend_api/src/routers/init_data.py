@@ -21,7 +21,7 @@ from src.security.auth import get_password_hash
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/init", tags=["health"])
+router = APIRouter(prefix="/api/init", tags=["health", "health"])
 
 class InitResult(BaseModel):
     """Initialization result."""
@@ -100,6 +100,7 @@ def _check_required_tables(db: Session) -> None:
         "permissions",
         "role_permissions",
         "user_roles",
+        "audit_logs",
     }
     try:
         inspector = inspect(db.bind)
@@ -244,21 +245,20 @@ def _seed_core_entities(db: Session, defaults: SeedDefaults) -> InitResult:
         503: {"description": "Database unreachable or misconfigured", "model": InitError},
         500: {"description": "Seeding failed due to server error", "model": InitError},
     },
-    tags=["health"],
+    tags=["health", "health"],
 )
+# PUBLIC_INTERFACE
 def seed_dev_data() -> InitResult:
-    """
-    Seed development data.
+    """Seed dev organization, admin user, roles and permissions.
 
-    This creates a default organization, an admin user with a bcrypt-hashed password,
-    essential roles and permissions, and assigns admin role to the admin user.
-    It is idempotent: running multiple times will not duplicate data.
-
-    Returns:
-        InitResult: created or existing IDs, plus dev email/password.
-
-    Raises:
-        HTTPException: 403 if disabled, or mapped errors with specific causes.
+    Public API:
+    - Method: POST /api/init/seed
+    - Response: 200 JSON with {created_org_id, created_user_id, email, password}
+    - Error responses:
+      403 when INIT_ALLOW != "1";
+      503 when DB is unreachable/misconfigured;
+      409 when required tables are missing;
+      500 for unexpected server or integrity/SQL errors.
     """
     _ensure_init_allowed()
     _assert_config_preconditions()
@@ -309,6 +309,7 @@ def seed_dev_data() -> InitResult:
             _check_required_tables(db)
 
             result = _seed_core_entities(db, defaults)
+            logger.info("Seed endpoint completed successfully: org_id=%s user_id=%s", result.created_org_id, result.created_user_id)
             return result
     except HTTPException:
         raise

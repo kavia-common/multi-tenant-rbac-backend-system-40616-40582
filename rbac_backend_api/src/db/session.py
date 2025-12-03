@@ -80,7 +80,7 @@ def _ensure_engine():
         except OperationalError as exc:
             logger.exception("Database connectivity check failed.")
             # Raise runtime error so API layer can map to 503 with clear message
-            raise RuntimeError("DB not configured or unreachable (OperationalError). Check DSN/MYSQL_* and DB service.") from exc
+            raise RuntimeError("DB not configured or unreachable (OperationalError). Check DSN/MYSQL_* and DB service. Verify credentials and host/port.") from exc
 
 
 # PUBLIC_INTERFACE
