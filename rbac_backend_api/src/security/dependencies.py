@@ -23,8 +23,16 @@ reuseable_oauth2 = HTTPBearer(auto_error=True)
 
 def get_db():
     """Yield a SQLAlchemy session."""
-    SessionFactory = SessionLocal()
-    db = SessionFactory()
+    try:
+        SessionFactory = SessionLocal()
+        db = SessionFactory()
+    except Exception as exc:
+        # Surface DB unavailability as a clear 503 for any endpoint using this dependency
+        from fastapi import HTTPException, status  # local import to avoid circulars at module import
+        import logging
+        logging.getLogger(__name__).exception("Database session initialization failed")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Database is not configured or unavailable") from exc
     try:
         yield db
     finally:

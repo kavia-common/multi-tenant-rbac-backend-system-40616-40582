@@ -84,6 +84,10 @@ class AppSettings:
           3) Else, check default relative path to ../rbac_mysql_database/db_connection.txt and parse if exists.
           4) Else, build from MYSQL_* env vars if available.
           5) If none available, do not raise; leave DSN as None and log a clear warning.
+
+        Notes:
+        - This method reads the current process environment each time the singleton is constructed. If you change env vars,
+          you must restart the app process for changes to take effect.
         """
         env = os.getenv("APP_ENV", "development")
 
@@ -129,8 +133,11 @@ class AppSettings:
                 )
 
         jwt_secret = os.getenv("JWT_SECRET_KEY", "change_me_in_env")
-        if jwt_secret == "change_me_in_env":
-            logger.warning("JWT_SECRET_KEY not set; using insecure default suitable for local dev only.")
+        if not jwt_secret or jwt_secret == "change_me_in_env":
+            logger.warning(
+                "JWT_SECRET_KEY not set; using insecure default suitable for local dev only. "
+                "Set JWT_SECRET_KEY in environment and restart the app."
+            )
         jwt_algo = os.getenv("JWT_ALGORITHM", "HS256")
         jwt_exp_minutes = int(os.getenv("JWT_ACCESS_EXPIRE_MINUTES", "60"))
 
