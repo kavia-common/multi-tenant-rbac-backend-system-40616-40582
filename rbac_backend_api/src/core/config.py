@@ -27,6 +27,28 @@ class JWTSettings:
     access_token_expire_minutes: int = 60
 
 
+def _build_dsn_from_mysql_env() -> Optional[str]:
+    """
+    Construct a MySQL DSN from standard MYSQL_* environment variables if present.
+    Expected vars (set by the database container):
+      - MYSQL_HOST
+      - MYSQL_PORT
+      - MYSQL_USER
+      - MYSQL_PASSWORD
+      - MYSQL_DB
+    Legacy/alt names DB_HOST/DB_PORT are also considered as fallback.
+    """
+    host = os.getenv("MYSQL_HOST") or os.getenv("MYSQL_URL") or os.getenv("DB_HOST") or "localhost"
+    port = os.getenv("MYSQL_PORT") or os.getenv("DB_PORT") or "3306"
+    user = os.getenv("MYSQL_USER")
+    password = os.getenv("MYSQL_PASSWORD", "")
+    database = os.getenv("MYSQL_DB")
+
+    if user and database:
+        return f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}"
+    return None
+
+
 @dataclass
 class AppSettings:
     """Application-wide settings, including database and JWT."""
@@ -58,7 +80,8 @@ class AppSettings:
           1) If DB_DSN is set in environment, use it.
           2) Else, if DB_CONNECTION_FILE env is set and file exists, parse it.
           3) Else, check default relative path to ../rbac_mysql_database/db_connection.txt and parse if exists.
-          4) If none available, do not raise; leave DSN as None and log a clear warning.
+          4) Else, build from MYSQL_* env vars if available.
+          5) If none available, do not raise; leave DSN as None and log a clear warning.
         """
         env = os.getenv("APP_ENV", "development")
 
@@ -80,11 +103,22 @@ class AppSettings:
                 default_rel = os.path.join(os.getcwd(), "..", "rbac_mysql_database", "db_connection.txt")
                 dsn = AppSettings._try_parse_db_file(default_rel)
 
-            # 4) If still not found, log warning and continue
+            # 4) Build from MYSQL_* env vars
+            if not dsn:
+                dsn = _build_dsn_from_mysql_env()
+                if dsn:
+                    # Log DSN minus password for observability
+                    try:
+                        safe_dsn = dsn.split("@")[-1]  # host:port/db
+                        logger.info("DB DSN constructed from MYSQL_* envs: mysql+pymysql://****:****@%s", safe_dsn)
+                    except Exception:
+                        logger.info("DB DSN constructed from MYSQL_* envs.")
+
+            # 5) If still not found, log warning and continue
             if not dsn:
                 logger.warning(
-                    "Database is not configured yet. Set DB_DSN or provide a db_connection.txt via "
-                    "DB_CONNECTION_FILE or at ../rbac_mysql_database/db_connection.txt. "
+                    "Database is not configured yet. Configure one of: DB_DSN, DB_CONNECTION_FILE, "
+                    "../rbac_mysql_database/db_connection.txt, or MYSQL_* env vars. "
                     "The application will start, but DB-backed endpoints will fail until configured."
                 )
 
@@ -110,7 +144,7 @@ _settings: Optional[AppSettings] = None
 
 # PUBLIC_INTERFACE
 def get_settings() -> AppSettings:
-    """Get cached application settings loaded from environment and db_connection.txt."""
+    """Get cached application settings loaded from env and db_connection.txt (with MYSQL_* fallback)."""
     global _settings
     if _settings is None:
         _settings = AppSettings.from_env()

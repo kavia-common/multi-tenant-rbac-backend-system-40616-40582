@@ -10,6 +10,7 @@ from src.routers.users import router as users_router
 from src.routers.roles import router as roles_router
 from src.routers.permissions import router as permissions_router
 from src.routers.audit_logs import router as audit_logs_router
+from src.routers.init_data import router as init_router
 
 # Basic logging configuration (can be overridden by deployment)
 logging.basicConfig(
@@ -47,7 +48,7 @@ app.include_router(users_router)
 app.include_router(roles_router)
 app.include_router(permissions_router)
 app.include_router(audit_logs_router)
-
+app.include_router(init_router)
 
 @app.get("/", tags=["health"], summary="Health Check", description="Basic service health check.")
 def health_check():

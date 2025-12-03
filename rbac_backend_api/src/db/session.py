@@ -10,6 +10,7 @@ import logging
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import OperationalError
 
 from src.core.config import get_settings
 
@@ -19,6 +20,7 @@ settings = get_settings()
 # Engine and session factory are created lazily to allow app startup without DB configured.
 _engine: Optional[object] = None
 _SessionLocal: Optional[sessionmaker] = None
+_connectivity_checked: bool = False  # ensure we test connectivity only once on first session creation
 
 
 def _build_dsn_from_env() -> Optional[str]:
@@ -26,7 +28,7 @@ def _build_dsn_from_env() -> Optional[str]:
     Attempt to construct a MySQL DSN from standard MYSQL_* environment variables if settings sql_alchemy_dsn is missing.
     This supports local/dev scenarios where db_connection.txt isn't present but env vars are.
     """
-    host = os.getenv("MYSQL_URL") or os.getenv("DB_HOST") or "localhost"
+    host = os.getenv("MYSQL_HOST") or os.getenv("MYSQL_URL") or os.getenv("DB_HOST") or "localhost"
     user = os.getenv("MYSQL_USER")
     password = os.getenv("MYSQL_PASSWORD", "")
     database = os.getenv("MYSQL_DB")
@@ -39,7 +41,7 @@ def _build_dsn_from_env() -> Optional[str]:
 
 def _ensure_engine():
     """Create engine and sessionmaker if DSN is available; otherwise raise a clear error on usage."""
-    global _engine, _SessionLocal
+    global _engine, _SessionLocal, _connectivity_checked
     if _engine is None or _SessionLocal is None:
         dsn = settings.sql_alchemy_dsn or _build_dsn_from_env()
         if not dsn:
@@ -48,7 +50,12 @@ def _ensure_engine():
                 "Database is not configured. Set DB_DSN, provide a db_connection.txt, or set MYSQL_* env vars and restart. "
                 "See .env.example for details."
             )
-        logger.info("Initializing database engine")
+        # Log DSN without password for visibility
+        try:
+            safe_dsn_tail = dsn.split("@")[-1]
+            logger.info("Initializing database engine with DSN: mysql+pymysql://****:****@%s", safe_dsn_tail)
+        except Exception:
+            logger.info("Initializing database engine with DSN from configuration.")
         _engine = create_engine(
             dsn,
             pool_pre_ping=True,
@@ -56,6 +63,18 @@ def _ensure_engine():
             future=True,
         )
         _SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False, future=True)
+
+    # Lightweight connectivity check once, on first use
+    if not _connectivity_checked:
+        try:
+            with _engine.connect() as conn:  # type: ignore[union-attr]
+                conn.execute("SELECT 1")
+            _connectivity_checked = True
+            logger.info("Database connectivity check succeeded.")
+        except OperationalError as exc:
+            logger.exception("Database connectivity check failed.")
+            # Raise runtime error so API layer can map to 503
+            raise RuntimeError("Database is unreachable. Verify MYSQL_* env vars and database availability.") from exc
 
 
 # PUBLIC_INTERFACE
