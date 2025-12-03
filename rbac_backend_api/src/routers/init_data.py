@@ -1,21 +1,24 @@
 from typing import Optional
 import os
 import logging
+from dataclasses import dataclass
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from src.db.session import SessionLocal
+from src.db.session import session_scope
+from src.models.organization import Organization
+from src.models.user import User
+from src.models.role import Role
+from src.models.permission import Permission
+from src.models.role_permission import RolePermission
+from src.models.user_role import UserRole
+from src.security.auth import get_password_hash
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/init", tags=["health"])
-
-def _get_db_session() -> Session:
-    SessionFactory = SessionLocal()
-    return SessionFactory()
 
 class InitResult(BaseModel):
     """Initialization result."""
@@ -23,6 +26,121 @@ class InitResult(BaseModel):
     created_user_id: Optional[int] = Field(None, description="Created user ID")
     email: Optional[str] = Field(None, description="User email for login")
     password: Optional[str] = Field(None, description="Plain test password (dev only)")
+
+@dataclass
+class SeedDefaults:
+    org_name: str = "Test Org"
+    email: str = "admin@example.com"
+    full_name: str = "Admin"
+    password: str = "Passw0rd!"
+
+def _ensure_init_allowed() -> None:
+    """Validate seeding is allowed via INIT_ALLOW env flag and log details."""
+    init_allow = os.getenv("INIT_ALLOW")
+    if init_allow != "1":
+        logger.warning("Attempt to call /api/init/seed while INIT_ALLOW=%s", init_allow)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Seeding disabled. Set INIT_ALLOW=1 in environment to enable.",
+        )
+
+def _seed_core_entities(db: Session, defaults: SeedDefaults) -> InitResult:
+    """
+    Seed organization, admin user (with bcrypt hash), essential roles and permissions.
+    Operation is idempotent: existing records will be reused.
+    Wrapped by transactional session_scope in the endpoint.
+    """
+    # Organization
+    org = db.query(Organization).filter(Organization.name == defaults.org_name).one_or_none()
+    if not org:
+        org = Organization(name=defaults.org_name)
+        db.add(org)
+        db.flush()  # assign id
+
+    # User
+    user = (
+        db.query(User)
+        .filter(User.org_id == org.id, User.email == defaults.email)
+        .one_or_none()
+    )
+    if not user:
+        user = User(
+            org_id=org.id,
+            email=defaults.email,
+            full_name=defaults.full_name,
+            hashed_password=get_password_hash(defaults.password),
+            is_active=True,
+        )
+        db.add(user)
+        db.flush()
+
+    # Roles
+    role_admin = (
+        db.query(Role)
+        .filter(Role.org_id == org.id, Role.name == "admin")
+        .one_or_none()
+    )
+    if not role_admin:
+        role_admin = Role(org_id=org.id, name="admin", description="Organization administrator")
+        db.add(role_admin)
+        db.flush()
+
+    role_user = (
+        db.query(Role)
+        .filter(Role.org_id == org.id, Role.name == "user")
+        .one_or_none()
+    )
+    if not role_user:
+        role_user = Role(org_id=org.id, name="user", description="Standard user")
+        db.add(role_user)
+        db.flush()
+
+    # Permissions (minimal set)
+    perm_names = [
+        "users:read", "users:write",
+        "roles:read", "roles:write",
+        "permissions:read", "permissions:write",
+        "audit:read",
+    ]
+    perms_by_name = {}
+    for pname in perm_names:
+        perm = (
+            db.query(Permission)
+            .filter(Permission.org_id == org.id, Permission.name == pname)
+            .one_or_none()
+        )
+        if not perm:
+            perm = Permission(org_id=org.id, name=pname, description=pname)
+            db.add(perm)
+            db.flush()
+        perms_by_name[pname] = perm
+
+    # Assign all permissions to admin role
+    for perm in perms_by_name.values():
+        rp = (
+            db.query(RolePermission)
+            .filter(RolePermission.role_id == role_admin.id, RolePermission.permission_id == perm.id)
+            .one_or_none()
+        )
+        if not rp:
+            db.add(RolePermission(role_id=role_admin.id, permission_id=perm.id))
+
+    # Ensure admin user has admin role
+    ur = (
+        db.query(UserRole)
+        .filter(UserRole.user_id == user.id, UserRole.role_id == role_admin.id)
+        .one_or_none()
+    )
+    if not ur:
+        db.add(UserRole(user_id=user.id, role_id=role_admin.id))
+
+    logger.info("Seeding successful or already present: org_id=%s user_id=%s", org.id, user.id)
+    return InitResult(
+        created_org_id=org.id,
+        created_user_id=user.id,
+        email=user.email,
+        password=defaults.password,
+    )
 
 # PUBLIC_INTERFACE
 @router.post(
@@ -32,62 +150,33 @@ class InitResult(BaseModel):
     description="Dev-only endpoint to initialize a test organization and user if database is empty. Requires INIT_ALLOW=1 env.",
 )
 def seed_dev_data() -> InitResult:
-    """Create a test organization and user if they do not exist. For development only."""
-    if os.getenv("INIT_ALLOW") != "1":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Seeding disabled")
+    """
+    Seed development data.
 
-    db = _get_db_session()
+    This creates a default organization, an admin user with a bcrypt-hashed password,
+    essential roles and permissions, and assigns admin role to the admin user.
+    It is idempotent: running multiple times will not duplicate data.
+
+    Returns:
+        InitResult: created or existing IDs, plus dev email/password.
+
+    Raises:
+        HTTPException: 403 if disabled, or 500 with details if an unexpected error occurs.
+    """
+    _ensure_init_allowed()
+
+    defaults = SeedDefaults()
     try:
-        # Ensure tables exist (best-effort). If using migrations normally, this is a safe no-op for MySQL with IF NOT EXISTS.
-        # Create minimal tables if missing.
-        db.execute(text(
-            "CREATE TABLE IF NOT EXISTS organizations ("
-            "id INT PRIMARY KEY AUTO_INCREMENT, "
-            "name VARCHAR(255) NOT NULL UNIQUE, "
-            "created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
-        ))
-        db.execute(text(
-            "CREATE TABLE IF NOT EXISTS users ("
-            "id INT PRIMARY KEY AUTO_INCREMENT, "
-            "org_id INT NOT NULL, "
-            "email VARCHAR(255) NOT NULL, "
-            "full_name VARCHAR(255) NULL, "
-            "hashed_password VARCHAR(255) NOT NULL, "
-            "is_active BOOLEAN NOT NULL DEFAULT TRUE, "
-            "created_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
-            "UNIQUE KEY uq_users_org_email (org_id, email))"
-        ))
-        # Insert org if missing
-        org_name = "Test Org"
-        res = db.execute(text("SELECT id FROM organizations WHERE name=:name"), {"name": org_name}).first()
-        org_id = res[0] if res else None
-        if org_id is None:
-            db.execute(text("INSERT INTO organizations (name) VALUES (:name)"), {"name": org_name})
-            res = db.execute(text("SELECT id FROM organizations WHERE name=:name"), {"name": org_name}).first()
-            org_id = res[0]
-
-        # Insert user if missing
-        email = "admin@example.com"
-        pwd_plain = "Passw0rd!"
-        # bcrypt hash for Passw0rd! generated via passlib context; precomputed to avoid dependency here
-        hashed = "$2b$12$Jv2lJ3J2T2l6m3O6Z3YQyex8S7p6c3H9b9vQYj2tBq1X4XcOqzQle"
-        res = db.execute(text("SELECT id FROM users WHERE org_id=:org AND email=:email"), {"org": org_id, "email": email}).first()
-        user_id = res[0] if res else None
-        if user_id is None:
-            db.execute(
-                text("INSERT INTO users (org_id, email, full_name, hashed_password, is_active) "
-                     "VALUES (:org_id, :email, :full_name, :hashed_password, 1)"),
-                {"org_id": org_id, "email": email, "full_name": "Admin", "hashed_password": hashed},
-            )
-            res = db.execute(text("SELECT id FROM users WHERE org_id=:org AND email=:email"), {"org": org_id, "email": email}).first()
-            user_id = res[0]
-
-        db.commit()
-        logger.info("Seeded dev data: org_id=%s user_id=%s email=%s", org_id, user_id, email)
-        return InitResult(created_org_id=org_id, created_user_id=user_id, email=email, password=pwd_plain)
+        with session_scope() as db:
+            result = _seed_core_entities(db, defaults)
+            return result
+    except HTTPException:
+        # pass through any explicit HTTPException
+        raise
     except Exception as exc:
-        db.rollback()
-        logger.exception("Seeding dev data failed")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Seeding failed") from exc
-    finally:
-        db.close()
+        # Detailed logging with exception info
+        logger.exception("Seeding failed due to unexpected error")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Seeding failed: {exc.__class__.__name__}",
+        ) from exc
