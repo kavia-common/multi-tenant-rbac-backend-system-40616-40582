@@ -50,15 +50,27 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Lazy imports to avoid import-time DB access or heavy side-effects
-    from src.routers.health import router as health_router  # noqa: WPS433
-    from src.routers.auth import router as auth_router  # noqa: WPS433
-    from src.routers.users import router as users_router  # noqa: WPS433
-    from src.routers.roles import router as roles_router  # noqa: WPS433
-    from src.routers.permissions import router as permissions_router  # noqa: WPS433
-    from src.routers.organizations import router as organizations_router  # noqa: WPS433
-    from src.routers.audit_logs import router as audit_logs_router  # noqa: WPS433
-    from src.routers.init_data import router as init_router  # noqa: WPS433
+    # Lazy imports to avoid import-time DB access or heavy side-effects.
+    # Try absolute import path first, and fall back to relative package import to be resilient in different runners.
+    try:
+        from src.routers.health import router as health_router  # type: ignore
+        from src.routers.auth import router as auth_router  # type: ignore
+        from src.routers.users import router as users_router  # type: ignore
+        from src.routers.roles import router as roles_router  # type: ignore
+        from src.routers.permissions import router as permissions_router  # type: ignore
+        from src.routers.organizations import router as organizations_router  # type: ignore
+        from src.routers.audit_logs import router as audit_logs_router  # type: ignore
+        from src.routers.init_data import router as init_router  # type: ignore
+    except ModuleNotFoundError:
+        # Fallback for environments that resolve module paths differently
+        from ..routers.health import router as health_router  # type: ignore
+        from ..routers.auth import router as auth_router  # type: ignore
+        from ..routers.users import router as users_router  # type: ignore
+        from ..routers.roles import router as roles_router  # type: ignore
+        from ..routers.permissions import router as permissions_router  # type: ignore
+        from ..routers.organizations import router as organizations_router  # type: ignore
+        from ..routers.audit_logs import router as audit_logs_router  # type: ignore
+        from ..routers.init_data import router as init_router  # type: ignore
 
     # Register routers (respect prefixes defined in each router file)
     app.include_router(health_router, tags=["health"])
