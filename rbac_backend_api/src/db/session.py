@@ -4,30 +4,51 @@ Handles absence of configured DB DSN gracefully by delaying engine creation.
 """
 
 from contextlib import contextmanager
-from typing import Generator
+from typing import Generator, Optional
+import os
+import logging
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.core.config import get_settings
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
 # Engine and session factory are created lazily to allow app startup without DB configured.
-_engine = None  # type: Optional[object]
-_SessionLocal = None  # type: Optional[sessionmaker]
+_engine: Optional[object] = None
+_SessionLocal: Optional[sessionmaker] = None
+
+
+def _build_dsn_from_env() -> Optional[str]:
+    """
+    Attempt to construct a MySQL DSN from standard MYSQL_* environment variables if settings sql_alchemy_dsn is missing.
+    This supports local/dev scenarios where db_connection.txt isn't present but env vars are.
+    """
+    host = os.getenv("MYSQL_URL") or os.getenv("DB_HOST") or "localhost"
+    user = os.getenv("MYSQL_USER")
+    password = os.getenv("MYSQL_PASSWORD", "")
+    database = os.getenv("MYSQL_DB")
+    port = os.getenv("MYSQL_PORT") or os.getenv("DB_PORT") or "3306"
+
+    if user and database:
+        return f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}"
+    return None
 
 
 def _ensure_engine():
     """Create engine and sessionmaker if DSN is available; otherwise raise a clear error on usage."""
     global _engine, _SessionLocal
     if _engine is None or _SessionLocal is None:
-        dsn = settings.sql_alchemy_dsn
+        dsn = settings.sql_alchemy_dsn or _build_dsn_from_env()
         if not dsn:
+            logger.error("Database DSN not configured. Provide DB_DSN or db_connection.txt or MYSQL_* environment vars.")
             raise RuntimeError(
-                "Database is not configured. Set DB_DSN or provide db_connection.txt and restart. "
+                "Database is not configured. Set DB_DSN, provide a db_connection.txt, or set MYSQL_* env vars and restart. "
                 "See .env.example for details."
             )
+        logger.info("Initializing database engine")
         _engine = create_engine(
             dsn,
             pool_pre_ping=True,

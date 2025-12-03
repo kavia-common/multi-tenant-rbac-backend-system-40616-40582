@@ -1,8 +1,10 @@
 from datetime import timedelta
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from src.core.config import get_settings
@@ -13,14 +15,24 @@ from src.schemas.user import UserOut
 from src.security.auth import create_access_token, verify_password
 from src.security.dependencies import get_current_user
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api", tags=["auth"])
 
 
 def get_db():
     """Yield a SQLAlchemy session."""
-    # SessionLocal() now returns the sessionmaker factory when called, then instantiating it creates a session.
-    SessionFactory = SessionLocal()
-    db = SessionFactory()
+    # SessionLocal() returns the sessionmaker factory when called, then instantiating it creates a session.
+    try:
+        SessionFactory = SessionLocal()
+        db = SessionFactory()
+    except Exception as exc:
+        # Surface database configuration issues as 503 instead of 500
+        logger.exception("Database session initialization failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database is not configured or unavailable",
+        ) from exc
     try:
         yield db
     finally:
@@ -49,17 +61,43 @@ class LoginRequest(BaseModel):
 )
 def login(request: LoginRequest, db: Session = Depends(get_db)) -> Token:
     """Authenticate a user by org_id and email, verify password, and issue a JWT access token."""
-    stmt = select(User).where(User.org_id == request.org_id, User.email == request.email)
-    user = db.execute(stmt).scalar_one_or_none()
-    if not user or not user.is_active:
+    # Basic validation to prevent 500 on missing fields (Pydantic handles type/required, but double-guard)
+    if request.org_id is None or request.email is None or request.password is None:
+        logger.warning("Login attempt with missing fields org_id=%s email_present=%s password_present=%s",
+                       request.org_id, bool(request.email), bool(request.password))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing login fields")
+
+    try:
+        logger.info("Login attempt for email=%s org_id=%s", request.email, request.org_id)
+        stmt = select(User).where(User.org_id == request.org_id, User.email == request.email)
+        user = db.execute(stmt).scalar_one_or_none()
+    except SQLAlchemyError as exc:
+        logger.exception("Database error during login for email=%s org_id=%s", request.email, request.org_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database error",
+        ) from exc
+
+    if not user:
+        logger.info("Login failed: user not found for email=%s org_id=%s", request.email, request.org_id)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    if not user.is_active:
+        logger.info("Login failed: user inactive for email=%s org_id=%s", request.email, request.org_id)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
-    if not verify_password(request.password, user.hashed_password):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    try:
+        if not verify_password(request.password, user.hashed_password):
+            logger.info("Login failed: bad password for email=%s org_id=%s", request.email, request.org_id)
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    except Exception as exc:
+        # If the stored hash is invalid/corrupt, avoid 500.
+        logger.exception("Password verification error for email=%s org_id=%s", request.email, request.org_id)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials") from exc
 
     settings = get_settings()
     expires = timedelta(minutes=settings.jwt.access_token_expire_minutes)
     token = create_access_token(subject=str(user.id), org_id=user.org_id, expires_delta=expires)
+    logger.info("Login success for user_id=%s org_id=%s", user.id, user.org_id)
     return Token(access_token=token, token_type="bearer")
 
 
