@@ -8,7 +8,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from src.core.config import get_settings
-from src.db.session import SessionLocal
+from src.db.session import get_db
 from src.models.user import User
 from src.schemas.auth import Token
 from src.schemas.user import UserOut
@@ -20,23 +20,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["auth"])
 
 
-def get_db():
-    """Yield a SQLAlchemy session."""
-    # SessionLocal() returns the sessionmaker factory when called, then instantiating it creates a session.
-    try:
-        SessionFactory = SessionLocal()
-        db = SessionFactory()
-    except Exception as exc:
-        # Surface database configuration issues as 503 instead of 500
-        logger.exception("Database session initialization failed")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database is not configured or unavailable",
-        ) from exc
-    try:
-        yield db
-    finally:
-        db.close()
+# Use shared get_db from src.db.session
 
 
 class LoginRequest(BaseModel):

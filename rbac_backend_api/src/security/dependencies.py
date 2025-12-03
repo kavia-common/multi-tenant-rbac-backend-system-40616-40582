@@ -10,7 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.db.session import SessionLocal
+from src.db.session import get_db
 from src.models.user import User
 from src.models.user_role import UserRole
 from src.models.role import Role
@@ -19,24 +19,7 @@ from src.models.permission import Permission
 from src.security.auth import decode_access_token
 
 reuseable_oauth2 = HTTPBearer(auto_error=True)
-
-
-def get_db():
-    """Yield a SQLAlchemy session."""
-    try:
-        SessionFactory = SessionLocal()
-        db = SessionFactory()
-    except Exception as exc:
-        # Surface DB unavailability as a clear 503 for any endpoint using this dependency
-        from fastapi import HTTPException, status  # local import to avoid circulars at module import
-        import logging
-        logging.getLogger(__name__).exception("Database session initialization failed")
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                            detail="Database is not configured or unavailable") from exc
-    try:
-        yield db
-    finally:
-        db.close()
+# Use get_db from src.db.session
 
 
 # PUBLIC_INTERFACE

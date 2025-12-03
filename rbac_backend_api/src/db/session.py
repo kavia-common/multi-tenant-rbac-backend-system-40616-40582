@@ -16,7 +16,7 @@ import logging
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 from src.core.config import get_settings
 
@@ -62,25 +62,36 @@ def _ensure_engine():
             logger.info("Initializing database engine with DSN: mysql+pymysql://****:****@%s", safe_dsn_tail)
         except Exception:
             logger.info("Initializing database engine with DSN from configuration.")
-        _engine = create_engine(
-            dsn,
-            pool_pre_ping=True,
-            pool_recycle=3600,
-            future=True,
-        )
-        _SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False, future=True)
+        try:
+            _engine = create_engine(
+                dsn,
+                pool_pre_ping=True,
+                pool_recycle=3600,
+                future=True,
+            )
+            _SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False, future=True)
+        except Exception as exc:
+            logger.exception("Failed creating SQLAlchemy engine")
+            raise RuntimeError("Failed to initialize DB engine. See server logs for details.") from exc
 
     # Lightweight connectivity check once, on first use
     if not _connectivity_checked:
         try:
+            assert _engine is not None
             with _engine.connect() as conn:  # type: ignore[union-attr]
                 conn.execute(text("SELECT 1"))
             _connectivity_checked = True
             logger.info("Database connectivity check succeeded.")
-        except OperationalError as exc:
-            logger.exception("Database connectivity check failed.")
+        except (OperationalError, SQLAlchemyError) as exc:
+            # Include DSN without password in logs for diagnostics
+            try:
+                safe_tail = (settings.sql_alchemy_dsn or _build_dsn_from_env() or "").split("@")[-1]
+                logger.error("Database connectivity check failed to %s", safe_tail)
+            except Exception:
+                logger.error("Database connectivity check failed.")
+            logger.exception("Exact DB error during connectivity probe")
             # Raise runtime error so API layer can map to 503 with clear message
-            raise RuntimeError("DB not configured or unreachable (OperationalError). Check DSN/MYSQL_* and DB service. Verify credentials and host/port.") from exc
+            raise RuntimeError("Database is not configured or unavailable") from exc
 
 
 # PUBLIC_INTERFACE
@@ -109,3 +120,15 @@ def SessionLocal():
     """
     _ensure_engine()
     return _SessionLocal
+
+
+# PUBLIC_INTERFACE
+def get_db() -> Generator:
+    """Yield a SQLAlchemy session from a single, shared SessionFactory source."""
+    _ensure_engine()
+    assert _SessionLocal is not None
+    db = _SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

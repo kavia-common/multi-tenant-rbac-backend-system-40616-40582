@@ -40,13 +40,15 @@ def _build_dsn_from_mysql_env() -> Optional[str]:
       - MYSQL_DB
     Legacy/alt names DB_HOST/DB_PORT are also considered as fallback.
     """
-    host = os.getenv("MYSQL_HOST") or os.getenv("MYSQL_URL") or os.getenv("DB_HOST") or "localhost"
+    # MYSQL_URL can sometimes include host only. Prefer explicit HOST and PORT vars.
+    host = os.getenv("MYSQL_HOST") or os.getenv("DB_HOST") or os.getenv("MYSQL_URL") or "localhost"
     port = os.getenv("MYSQL_PORT") or os.getenv("DB_PORT") or "3306"
     user = os.getenv("MYSQL_USER")
     password = os.getenv("MYSQL_PASSWORD", "")
     database = os.getenv("MYSQL_DB")
 
     if user and database:
+        # Escape special characters in password for URL if needed; most drivers accept raw, but keep simple here
         return f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}"
     return None
 
