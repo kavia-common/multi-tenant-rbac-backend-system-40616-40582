@@ -1,3 +1,7 @@
+"""
+Health router exposing liveness and optional database health endpoints.
+This module must not perform any network I/O or DB connections at import time.
+"""
 from typing import Optional
 import logging
 
@@ -8,7 +12,9 @@ from src.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+# PUBLIC_INTERFACE
 router = APIRouter(prefix="/api/health", tags=["health"])
+"""Health router with prefixed endpoints under /api/health."""
 
 class DBHealth(BaseModel):
     """Database health status."""
@@ -31,10 +37,10 @@ def health_db() -> DBHealth:
     - If DSN is configured, we don't force a live connection here; operational endpoints will probe when used.
     """
     settings = get_settings()
-    dsn = settings.sql_alchemy_dsn
+    dsn = getattr(settings, "sql_alchemy_dsn", None)
     if dsn:
         try:
-            masked = f"mysql+pymysql://****:****@{dsn.split('@')[-1]}"
+            masked = f"mysql+pymysql://****:****@{str(dsn).split('@')[-1]}"
         except Exception:
             masked = "configured"
         return DBHealth(status="ok", dsn=masked, notes="DSN configured; connectivity probed on first DB use.")

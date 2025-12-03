@@ -10,20 +10,6 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 import os
 
-from src.routers.auth import router as auth_router
-from src.routers.organizations import router as organizations_router
-from src.routers.users import router as users_router
-from src.routers.roles import router as roles_router
-from src.routers.permissions import router as permissions_router
-from src.routers.audit_logs import router as audit_logs_router
-from src.routers.init_data import router as init_router
-from src.routers.health import router as health_router
-
-# Basic logging configuration (can be overridden by deployment)
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-)
 
 openapi_tags = [
     {"name": "health", "description": "Health check and service info"},
@@ -31,38 +17,71 @@ openapi_tags = [
     {"name": "rbac", "description": "RBAC management endpoints"},
 ]
 
-app = FastAPI(
-    title=os.getenv("PROJECT_NAME", "RBAC Backend API"),
-    description="Multi-tenant RBAC backend with JWT auth and SQLAlchemy",
-    version="0.1.0",
-    openapi_tags=openapi_tags,
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Register routers
-app.include_router(auth_router)
-app.include_router(organizations_router)
-app.include_router(users_router)
-app.include_router(roles_router)
-app.include_router(permissions_router)
-app.include_router(audit_logs_router)
-app.include_router(init_router)
-app.include_router(health_router)
 
 # PUBLIC_INTERFACE
-@app.get("/", tags=["health"], summary="Health Check", description="Basic service health check.")
-def health_check():
-    """
-    Basic liveness probe for the service.
+def create_app() -> FastAPI:
+    """Create and configure the FastAPI application without triggering side effects at import time.
 
+    This function wires up all routers using lazy imports to avoid touching the database at module import.
     Returns:
-        JSON object with a message indicating service status.
+        FastAPI: Configured FastAPI application.
     """
-    return {"message": "Healthy"}
+    # Basic logging configuration (can be overridden by deployment)
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+
+    app = FastAPI(
+        title=os.getenv("PROJECT_NAME", "RBAC Backend API"),
+        description="Multi-tenant RBAC backend with JWT auth and SQLAlchemy",
+        version="0.1.0",
+        openapi_tags=openapi_tags,
+        openapi_url="/openapi.json",
+        docs_url="/docs",
+        redoc_url="/redoc",
+    )
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Lazy imports to avoid import-time DB access or heavy side-effects
+    from src.routers.health import router as health_router  # noqa: WPS433
+    from src.routers.auth import router as auth_router  # noqa: WPS433
+    from src.routers.users import router as users_router  # noqa: WPS433
+    from src.routers.roles import router as roles_router  # noqa: WPS433
+    from src.routers.permissions import router as permissions_router  # noqa: WPS433
+    from src.routers.organizations import router as organizations_router  # noqa: WPS433
+    from src.routers.audit_logs import router as audit_logs_router  # noqa: WPS433
+    from src.routers.init_data import router as init_router  # noqa: WPS433
+
+    # Register routers (respect prefixes defined in each router file)
+    app.include_router(health_router, tags=["health"])
+    app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
+    app.include_router(users_router, prefix="/api", tags=["rbac"])
+    app.include_router(roles_router, prefix="/api", tags=["rbac"])
+    app.include_router(permissions_router, prefix="/api", tags=["rbac"])
+    app.include_router(organizations_router, prefix="/api", tags=["rbac"])
+    app.include_router(audit_logs_router, prefix="/api", tags=["rbac"])
+    app.include_router(init_router, prefix="/api", tags=["health"])
+
+    @app.get("/", tags=["health"], summary="Health Check", description="Basic service health check.")
+    # PUBLIC_INTERFACE
+    def health_check():
+        """Service liveness probe endpoint.
+
+        Returns:
+            dict: simple status payload.
+        """
+        return {"status": "ok"}
+
+    return app
+
+
+# FastAPI expects a module-level `app` for uvicorn import path usage (src.api.main:app)
+app = create_app()
