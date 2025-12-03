@@ -9,6 +9,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 import os
+import sys
+from pathlib import Path
 
 
 openapi_tags = [
@@ -17,6 +19,12 @@ openapi_tags = [
     {"name": "rbac", "description": "RBAC management endpoints"},
 ]
 
+
+# Ensure 'src' is on sys.path for absolute imports when running with different working directories
+_src_dir = Path(__file__).resolve().parents[1]
+if str(_src_dir) not in sys.path:
+    # Prepend so our project src takes precedence without affecting other global paths
+    sys.path.insert(0, str(_src_dir))
 
 # PUBLIC_INTERFACE
 def create_app() -> FastAPI:
