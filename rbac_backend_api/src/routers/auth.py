@@ -17,8 +17,9 @@ from src.security.dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/auth", tags=["auth"])
-
+# Define router WITHOUT /api or /auth prefix to avoid duplicated segments.
+# Prefix will be added once at app level via include_router(..., prefix="/api/auth")
+router = APIRouter(tags=["auth"])
 
 # Use shared get_db from src.db.session
 
@@ -32,7 +33,7 @@ class LoginRequest(BaseModel):
 
 # PUBLIC_INTERFACE
 @router.post(
-    "/auth/login",
+    "/login",
     response_model=Token,
     status_code=status.HTTP_200_OK,
     summary="Login to obtain JWT access token",

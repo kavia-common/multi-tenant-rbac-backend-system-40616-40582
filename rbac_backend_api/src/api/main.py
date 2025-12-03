@@ -80,15 +80,23 @@ def create_app() -> FastAPI:
         from ..routers.audit_logs import router as audit_logs_router  # type: ignore
         from ..routers.init_data import router as init_router  # type: ignore
 
-    # Register routers (respect prefixes defined in each router file)
+    # Register routers:
+    # - health router already defines prefix="/api/health" in its module
     app.include_router(health_router, tags=["health"])
+
+    # - auth router defines no prefix; we mount once at /api/auth
     app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
-    app.include_router(users_router, prefix="/api", tags=["rbac"])
-    app.include_router(roles_router, prefix="/api", tags=["rbac"])
-    app.include_router(permissions_router, prefix="/api", tags=["rbac"])
-    app.include_router(organizations_router, prefix="/api", tags=["rbac"])
-    app.include_router(audit_logs_router, prefix="/api", tags=["rbac"])
-    app.include_router(init_router, prefix="/api", tags=["health"])
+
+    # - RBAC resources: each router currently defines full prefixes starting with /api/...
+    #   To avoid double /api/api, include them without additional /api prefix.
+    app.include_router(users_router, tags=["rbac"])
+    app.include_router(roles_router, tags=["rbac"])
+    app.include_router(permissions_router, tags=["rbac"])
+    app.include_router(organizations_router, tags=["rbac"])
+    app.include_router(audit_logs_router, tags=["rbac"])
+
+    # - init router defines prefix="/api/init" already
+    app.include_router(init_router, tags=["health"])
 
     @app.get("/", tags=["health"], summary="Health Check", description="Basic service health check.")
     # PUBLIC_INTERFACE

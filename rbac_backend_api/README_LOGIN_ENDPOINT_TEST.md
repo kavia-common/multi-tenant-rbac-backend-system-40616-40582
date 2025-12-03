@@ -1,31 +1,30 @@
-# Login Endpoint Path Test Note
+# Auth Route Path Verification
 
-Purpose:
-Ensure the authentication login endpoint is mounted at /api/auth/login (without duplicated segments).
+This project mounts routers to avoid duplicated prefixes. Final expected paths:
 
-What changed:
-- The auth router now uses prefix="/auth".
-- The main app includes the auth router with include_router(..., prefix="/api/auth").
-- Combined, the login route resolves to /api/auth/login.
+- POST /api/auth/login
+- GET /api/auth/me
+- GET /api/health/db
+- RBAC resources under /api (e.g., /api/users, /api/roles, /api/permissions, /api/orgs, /api/audit_logs)
 
-How to verify locally:
-1) Start the FastAPI app and open the API docs:
-   - Navigate to /docs and look for the POST /api/auth/login operation under "auth" tag.
+Quick tests (adjust HOST accordingly):
 
-2) cURL check:
-   curl -s -o /dev/null -w "%{http_code}\n" \
-     -H "Content-Type: application/json" \
-     -d '{"org_id":1,"email":"someone@example.com","password":"secret"}' \
-     http://localhost:3001/api/auth/login
+curl -sS -X POST "$HOST/api/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"org_id":1,"email":"test@example.com","password":"password"}'
 
-   Expect a 401 (if credentials are wrong) or 200 with a token (if valid), but NOT a 404.
+# After obtaining a token:
+TOKEN="Bearer <access_token_here>"
+curl -sS -H "Authorization: $TOKEN" "$HOST/api/auth/me"
 
-3) OpenAPI path check:
-   - GET /openapi.json and confirm that there is a path entry for "/api/auth/login"
-   - Ensure there is no "/api/auth/api/auth/login" entry.
+OpenAPI should show:
+- POST /api/auth/login
+- GET  /api/auth/me
+- Other endpoints under /api/* (without duplicated /api segments)
 
 Notes:
-If you see duplicated segments in other routes, ensure only one of:
-- The router itself has a full "/api/..." prefix, OR
-- The include_router call specifies the "/api" prefix.
-Do not set both to avoid duplication.
+- DB/session access remains lazy and occurs only within request handlers via Depends(get_db).
+- If you still see duplicated segments, ensure:
+  - src/routers/auth.py defines APIRouter with no prefix
+  - src/api/main.py includes auth router exactly once:
+    app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
